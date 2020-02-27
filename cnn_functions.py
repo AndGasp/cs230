@@ -18,7 +18,7 @@ import h5py
 class my_Dataset_train(Dataset):
     """
     Defined for a training dataset of n signal events and n background events 
-    to train on all masses at once (from file with 1.1 million background events and signal files with 300 000 events each)
+    to train on all masses at once (from file with 1.8 million background events and signal files with 400 000 events each)
 
     Used to define training datasets
 
@@ -96,8 +96,8 @@ class my_Dataset_train(Dataset):
 
 class my_Dataset_test(Dataset):
     """
-    Defined for a test dataset of 40 000 signal events and 40 000 background events SPECIFICALLY, 
-    to train on all masses at once (from file with 1.1 million background events and signal files with 300 000 events each)
+    Defined for a test dataset of n signal events and n background events SPECIFICALLY, 
+    to train on all masses at once (from file with 1.8 million background events and signal files with 400 000 events each)
 
     Used to define testing datasets
 
@@ -173,6 +173,68 @@ class my_Dataset_test(Dataset):
         return (events,labels,masses)
 
 
+class my_Dataset_test_single(Dataset):
+    """
+    Defined for a test dataset of n events from desired dataset in hdf5 file
+    (max 400 000 for signal datasets and max 1.8 million for background)
+
+    Used to define testing datasets
+
+    Can also accept defined torchvision transforms to apply the data before training (minimally need to
+    convert data to pytorch tensor, normalisation)
+    
+    len defined to get number of events
+
+    getitem defined to use dataset for iterators over events (Dataloader)
+    """
+
+    def __init__(self,n,dataset,m,transform=None):
+        #initialize dataset
+        self.n = n
+        self.hdf5_file = h5py.File('dataset.hdf5', 'r')
+        self.group = dataset
+        self.transform = transform
+        self.m = m
+
+        #get dimensions of image
+        one_image = self.hdf5_file[dataset][0,:,:,:]
+        self.dim = one_image[:,0,0]
+        self.depth = one_image[0,0,:]
+
+
+    def __len__(self):
+        return self.n
+
+    def __getitem__(self, idx):
+        if torch.is_tensor(idx):
+            idx = idx.tolist()
+
+        n_batch = len(idx)
+        events = np.zeros(n_batch,self.dim,self.dim,self.depth)
+
+        labels[j] = m!=0 * np.ones(n_batch)
+
+        if self.m == 0:
+            m_randint = np.random.randint(4,size=n_batch)
+            m_list = [1,10,100,1000]
+            masses = m_list[m_randint]
+        else:
+            masses = np.ones(n_batch) * self.m
+
+
+        data = self.hdf5_file[self.group] #pointer to dataset in disk
+        events[j,:,:,:] = data[idx,:,:,:] #locally save desired images (from end of dataset to avoid overlapping with training events)
+
+        #convert to tensors
+        labels = torch.from_numpy(labels)
+        masses = torch.from_numpy(masses).double()
+
+        if self.transform:
+
+            events = self.transform(events) #minimallt convert to tensors
+
+        return (events,labels,masses)
+
 
 class ConvNet(torch.torch.nn.Module):
     """
@@ -205,7 +267,7 @@ class ConvNet(torch.torch.nn.Module):
 
 class ModelExtraInput(torch.torch.nn.Module):
     """
-    Same simple architecture as ConvNet, but take extra input as an argument (A' mass!), 
+    Extra input as an argument (A' mass!), 
     adds it the the 2nd FCC layer and has two extra FCC layers to compute an output as 
     a function of mass
     """
@@ -216,22 +278,34 @@ class ModelExtraInput(torch.torch.nn.Module):
             torch.nn.ReLU(),
             torch.nn.MaxPool2d(kernel_size=2, stride=2))
         self.layer2 = torch.nn.Sequential(
-            torch.nn.Conv2d(32, 64, kernel_size=5, stride=1, padding=2),
+            torch.nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
             torch.nn.ReLU(),
             torch.nn.MaxPool2d(kernel_size=2, stride=2))
-        self.drop_out = torch.nn.Dropout()
-        self.fc1 = torch.nn.Linear(5 * 5 * 64, 20)
-        
-        self.fc2 = torch.nn.Linear(20 + 1, 60)
-        self.fc3 = torch.nn.Linear(60, 2)
+        self.layer3 = torch.nn.Sequential(
+            torch.nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
+            torch.nn.ReLU(),
+            torch.nn.MaxPool2d(kernel_size=2, stride=2))
+        self.layer4 = torch.nn.Sequential(
+            torch.nn.Conv2d(128, 64, kernel_size=1, stride=1, padding=1),
+            torch.nn.ReLU())
+        self.layer5 = torch.nn.Sequential(
+            torch.nn.Conv2d(64, 16, kernel_size=1, stride=1, padding=1),
+            torch.nn.ReLU())
+        self.drop_out = torch.nn.Dropout(p=0.6)
+        self.fc1 = torch.nn.Linear(8 * 8 * 16, 24)
+        self.fc2 = torch.nn.Linear(24 + 1, 48)
+        self.fc3 = torch.nn.Linear(48, 1)
         
     def forward(self, x, m):
 
         out = self.layer1(x)
         out = self.layer2(out)
+        out = self.layer3(out)
+        out = self.layer4(out)
+        out = self.layer5(out)
         out = out.reshape(out.size(0), -1)
         out = self.drop_out(out)
-        out = self.fc1(out)
+        out = F.relu(self.fc1(out))
         x1 = out.float()
         x2 = torch.empty([len(x),1])
         x2[:,0] = m.float()
@@ -257,7 +331,7 @@ def train_test_cnn_single_m(model,train_loader,test_loader,n_epochs,learn_rate,b
     array with images, in the order in which they were fed to the network
     """
     # Loss and optimizer
-    criterion =  torch.nn.CrossEntropyLoss()
+    criterion =  torch.nn.binary_cross_entropy()
     optimizer = torch.optim.Adam(model.parameters(), lr=learn_rate)
 
 
